@@ -348,3 +348,66 @@ Para compatibilidad con Python 3.13+ se eliminó el parser basado en `cgi.FieldS
 No cambian rutas ni formato esperado desde frontend:
 - `Content-Type: multipart/form-data; boundary=...`
 - Campo de archivo: `file`
+
+## Benchmark automático de modelos Ollama
+
+Permite comparar modelos de chat detectados en Ollama y guardar histórico para análisis.
+
+### Endpoints
+- `POST /api/models/benchmark`
+- `GET /api/models/benchmark/results`
+
+### Métricas comparativas
+Por cada modelo probado se registran:
+- `avg_latency_ms`: latencia promedio por prompt.
+- `avg_quality_score`: calidad estimada (heurística por cobertura + longitud + estructura).
+- `memory_rss_mb`: uso de memoria RSS del proceso durante benchmark.
+
+### Almacenamiento histórico
+- Archivo persistente: `chroma_db/model_benchmark_results.json`.
+- Se guarda cada corrida con `run_id`, prompts usados, modelos evaluados y resultados.
+
+### Ejemplo de resultado JSON
+```json
+{
+  "run_id": 1730000000000,
+  "started_at_ms": 1730000000000,
+  "finished_at_ms": 1730000002500,
+  "prompts": [
+    "Explica brevemente qué es inteligencia artificial y menciona dos riesgos."
+  ],
+  "models_tested": ["llama3.1:8b", "mistral:7b"],
+  "results": [
+    {
+      "model": "llama3.1:8b",
+      "avg_latency_ms": 420.5,
+      "avg_quality_score": 0.73,
+      "memory_rss_mb": 312.4,
+      "memory_source": "resource",
+      "ok_prompts": 1,
+      "failed_prompts": 0,
+      "prompt_results": [
+        {
+          "prompt": "Explica brevemente qué es inteligencia artificial y menciona dos riesgos.",
+          "latency_ms": 420.5,
+          "quality": {
+            "score": 0.73,
+            "coverage": 0.5,
+            "length_chars": 388,
+            "structure_score": 1.0
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Ejecución rápida
+```bash
+curl -sS -X POST http://127.0.0.1:7860/api/models/benchmark \
+  -H 'Content-Type: application/json' \
+  -d '{"limit_models": 3}'
+
+curl -sS 'http://127.0.0.1:7860/api/models/benchmark/results?limit=5'
+```

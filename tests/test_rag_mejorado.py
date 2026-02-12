@@ -162,6 +162,60 @@ class MultipartUploadParserTests(unittest.TestCase):
             web_ui.parse_multipart_file("application/json", b"{}")
 
 
+class ModelBenchmarkTests(unittest.TestCase):
+    def test_run_model_benchmark_persists_results(self):
+        with tempfile.TemporaryDirectory() as td:
+            benchmark_file = Path(td) / "benchmark.json"
+
+            class FakeLLM:
+                def __init__(self, model=None, **kwargs):
+                    self.model = model
+
+                def invoke(self, prompt):
+                    return f"respuesta del modelo {self.model} sobre {prompt[:20]}"
+
+            with patch.object(rag, "BENCHMARK_RESULTS_FILE", benchmark_file), patch.object(
+                rag, "list_ollama_models", return_value=["llama3.1:8b", "mistral:7b"]
+            ), patch.object(
+                rag, "classify_models", return_value={rag.TASK_CHAT: ["llama3.1:8b", "mistral:7b"], rag.TASK_EMBEDDING: [], rag.TASK_DEEP_ANALYSIS: []}
+            ), patch.object(
+                rag, "_lazy_import_langchain", return_value=(None, None, None, None, FakeLLM)
+            ):
+                out = rag.run_model_benchmark(prompts=["prompt test"], limit_models=2)
+
+            self.assertIn("results", out)
+            self.assertEqual(len(out["results"]), 2)
+            self.assertTrue(benchmark_file.exists())
+            saved = json.loads(benchmark_file.read_text(encoding="utf-8"))
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(saved[0]["results"][0]["ok_prompts"], 1)
+
+    def test_get_benchmark_results_limit(self):
+        with tempfile.TemporaryDirectory() as td:
+            benchmark_file = Path(td) / "benchmark.json"
+            benchmark_file.write_text(
+                json.dumps(
+                    [
+                        {"run_id": 1, "results": []},
+                        {"run_id": 2, "results": []},
+                        {"run_id": 3, "results": []},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(rag, "BENCHMARK_RESULTS_FILE", benchmark_file):
+                payload = rag.get_benchmark_results(limit=2)
+            self.assertEqual(payload["count"], 2)
+            self.assertEqual(payload["results"][0]["run_id"], 3)
+
+    def test_run_model_benchmark_without_models_fails(self):
+        with patch.object(rag, "list_ollama_models", return_value=[]), patch.object(
+            rag, "classify_models", return_value={rag.TASK_CHAT: [], rag.TASK_EMBEDDING: [], rag.TASK_DEEP_ANALYSIS: []}
+        ):
+            with self.assertRaises(ValueError):
+                rag.run_model_benchmark(prompts=["x"])
+
+
 class MetadataTests(unittest.TestCase):
     def test_enrich_metadata_contains_required_fields(self):
         d = DummyDoc("contenido", {"page": 2})

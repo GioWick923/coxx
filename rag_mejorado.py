@@ -63,6 +63,7 @@ SEMANTIC_CACHE_FILE = CHROMA_DIR / "semantic_cache.json"
 WEB_SOURCES_FILE = DATA_FOLDER / "web_sources.txt"
 MODEL_PROFILES_FILE = CHROMA_DIR / "model_profiles.json"
 HISTORY_FILE = CHROMA_DIR / "query_history.json"
+BENCHMARK_RESULTS_FILE = CHROMA_DIR / "model_benchmark_results.json"
 
 ACTIVE_EMBED_MODEL = EMBED_MODEL
 ACTIVE_CHAT_MODEL = CHAT_MODEL
@@ -371,6 +372,168 @@ def apply_model_profile(name: str) -> Dict[str, Any]:
 
 
 CONFIG_EXPORT_VERSION = 1
+
+DEFAULT_BENCHMARK_PROMPTS = [
+    "Explica brevemente qué es inteligencia artificial y menciona dos riesgos.",
+    "Resume en 3 puntos prácticos cómo usar RAG para responder preguntas sobre documentos.",
+]
+
+
+def _load_benchmark_results() -> List[Dict[str, Any]]:
+    if BENCHMARK_RESULTS_FILE.exists():
+        try:
+            data = json.loads(BENCHMARK_RESULTS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return data
+        except Exception:
+            logger.warning("Archivo benchmark inválido, se reinicia histórico")
+    return []
+
+
+def _save_benchmark_results(items: List[Dict[str, Any]]) -> None:
+    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+    BENCHMARK_RESULTS_FILE.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _estimate_answer_quality(answer: str, prompt: str) -> Dict[str, Any]:
+    """Heurística simple de calidad para benchmark automático.
+
+    Puntúa por:
+    - longitud mínima útil,
+    - cobertura de palabras clave del prompt,
+    - estructura con viñetas/numeración (para respuestas accionables).
+    """
+    text = (answer or "").strip()
+    prompt_tokens = {t for t in prompt.lower().replace(".", " ").split() if len(t) > 4}
+    answer_tokens = set(text.lower().replace(".", " ").split())
+    overlap = len(prompt_tokens & answer_tokens)
+    coverage = overlap / max(1, len(prompt_tokens))
+    length_score = min(len(text) / 500.0, 1.0)
+    structure_score = 1.0 if any(tok in text for tok in ("- ", "1)", "1.", "•")) else 0.5
+    quality = round(min(1.0, (0.45 * coverage) + (0.35 * length_score) + (0.20 * structure_score)), 3)
+    return {
+        "score": quality,
+        "coverage": round(coverage, 3),
+        "length_chars": len(text),
+        "structure_score": structure_score,
+    }
+
+
+def run_model_benchmark(
+    prompts: Optional[List[str]] = None,
+    models: Optional[List[str]] = None,
+    limit_models: int = 5,
+) -> Dict[str, Any]:
+    """Ejecuta benchmark automático comparando modelos de chat detectados.
+
+    Métricas por modelo:
+    - `avg_latency_ms`
+    - `avg_quality_score` (heurística estimada)
+    - `memory_rss_mb` (estimación del proceso al ejecutar)
+    """
+    prompts_to_use = [p.strip() for p in (prompts or DEFAULT_BENCHMARK_PROMPTS) if p and p.strip()]
+    if not prompts_to_use:
+        raise ValueError("Se requiere al menos un prompt para benchmark")
+
+    installed = list_ollama_models()
+    grouped = classify_models(installed)
+    candidate_models = models if models is not None else grouped.get(TASK_CHAT, [])
+    candidate_models = [m for m in candidate_models if m in installed][: max(1, min(limit_models, 10))]
+    if not candidate_models:
+        raise ValueError("No hay modelos de chat disponibles para benchmark")
+
+    _, _, _, _, OllamaLLM = _lazy_import_langchain()
+
+    bench_items: List[Dict[str, Any]] = []
+    started_ms = int(time.time() * 1000)
+    for model_name in candidate_models:
+        latencies: List[float] = []
+        quality_scores: List[float] = []
+        prompt_results: List[Dict[str, Any]] = []
+        for prompt in prompts_to_use:
+            t0 = _now_ms()
+            try:
+                llm = OllamaLLM(model=model_name, **ACTIVE_GENERATION_CONFIG)
+                answer = llm.invoke(prompt)
+                latency = round(_now_ms() - t0, 2)
+                latencies.append(latency)
+                q = _estimate_answer_quality(str(answer), prompt)
+                quality_scores.append(q["score"])
+                prompt_results.append(
+                    {
+                        "prompt": prompt,
+                        "latency_ms": latency,
+                        "quality": q,
+                    }
+                )
+            except Exception as exc:
+                prompt_results.append(
+                    {
+                        "prompt": prompt,
+                        "error": str(exc),
+                    }
+                )
+
+        rss_mb, mem_source = MODEL_METRICS._detect_memory_mb()
+        if rss_mb is None:
+            rss_mb = 0.0
+        bench_items.append(
+            {
+                "model": model_name,
+                "avg_latency_ms": round(sum(latencies) / len(latencies), 2) if latencies else 0.0,
+                "avg_quality_score": round(sum(quality_scores) / len(quality_scores), 3) if quality_scores else 0.0,
+                "memory_rss_mb": rss_mb,
+                "memory_source": mem_source,
+                "prompt_results": prompt_results,
+                "ok_prompts": len(latencies),
+                "failed_prompts": len([r for r in prompt_results if "error" in r]),
+            }
+        )
+
+    run = {
+        "run_id": int(time.time() * 1000),
+        "started_at_ms": started_ms,
+        "finished_at_ms": int(time.time() * 1000),
+        "prompts": prompts_to_use,
+        "models_tested": candidate_models,
+        "results": bench_items,
+    }
+    history = _load_benchmark_results()
+    history.append(run)
+    history = history[-200:]
+    _save_benchmark_results(history)
+    return run
+
+
+def get_benchmark_results(limit: int = 20) -> Dict[str, Any]:
+    """Devuelve histórico de benchmark persistente.
+
+    Ejemplo JSON:
+    {
+      "count": 1,
+      "results": [
+        {
+          "run_id": 1730000000000,
+          "results": [
+            {
+              "model": "llama3.1:8b",
+              "avg_latency_ms": 523.3,
+              "avg_quality_score": 0.74,
+              "memory_rss_mb": 311.2
+            }
+          ]
+        }
+      ]
+    }
+    """
+    all_items = list(reversed(_load_benchmark_results()))
+    safe_limit = max(1, min(int(limit or 20), 100))
+    selected = all_items[:safe_limit]
+    return {
+        "count": len(selected),
+        "results": selected,
+        "benchmark_file": str(BENCHMARK_RESULTS_FILE),
+    }
 
 
 def _validate_models_exist(models: List[str], installed_models: Optional[List[str]] = None) -> None:

@@ -770,6 +770,8 @@ class Handler(BaseHTTPRequestHandler):
                 get_data_inventory,
                 get_cache_status,
                 get_history,
+                get_benchmark_results,
+                run_model_benchmark,
                 apply_model_profile,
                 delete_model_profile,
                 export_configuration,
@@ -792,6 +794,8 @@ class Handler(BaseHTTPRequestHandler):
             "get_data_inventory": get_data_inventory,
             "get_cache_status": get_cache_status,
             "get_history": get_history,
+            "get_benchmark_results": get_benchmark_results,
+            "run_model_benchmark": run_model_benchmark,
             "get_runtime_config": get_runtime_config,
             "get_model_metrics": get_model_metrics,
             "list_model_profiles": list_model_profiles,
@@ -916,6 +920,22 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(payload)
             return
 
+        if self.path.startswith("/api/models/benchmark/results"):
+            try:
+                backend = self._get_backend()
+                parsed = urlparse(self.path)
+                params = parse_qs(parsed.query)
+                limit = int(params.get("limit", ["20"])[0])
+                payload = backend["get_benchmark_results"](limit=limit)
+            except ValueError:
+                self._send_json({"error": "Parámetro limit inválido"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+            self._send_json(payload)
+            return
+
         self._send_json({"error": "Ruta no encontrada"}, status=HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:  # noqa: N802
@@ -1008,6 +1028,27 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             self._send_json(result)
+            return
+
+        if self.path == "/api/models/benchmark":
+            try:
+                backend = self._get_backend()
+                data = self._parse_json_body()
+                prompts = data.get("prompts") if isinstance(data.get("prompts"), list) else None
+                models = data.get("models") if isinstance(data.get("models"), list) else None
+                limit_models = int(data.get("limit_models", 5))
+                payload = backend["run_model_benchmark"](
+                    prompts=prompts,
+                    models=models,
+                    limit_models=limit_models,
+                )
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+            self._send_json(payload)
             return
 
         if self.path == "/api/config/import":
