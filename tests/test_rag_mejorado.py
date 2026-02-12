@@ -79,6 +79,54 @@ class SmartResponseCacheTests(unittest.TestCase):
                 self.assertEqual(cleared["entries"], 0)
 
 
+class QueryHistoryTests(unittest.TestCase):
+    def test_history_store_add_and_filter(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = rag.QueryHistoryStore(Path(td) / "history.json")
+            store.add(
+                question="riesgos de ia",
+                model="llama3.1:8b",
+                latency_ms=110.2,
+                documents=[{"source": "a.pdf", "file_type": "pdf", "page_number": 1}],
+                answer="respuesta 1",
+            )
+            store.add(
+                question="beneficios de ia",
+                model="mistral:7b",
+                latency_ms=95,
+                documents=[{"source": "b.txt", "file_type": "txt", "page_number": None}],
+                answer="respuesta 2",
+            )
+
+            all_rows = store.list(limit=10)
+            self.assertEqual(len(all_rows), 2)
+
+            only_model = store.list(model="mistral:7b", limit=10)
+            self.assertEqual(len(only_model), 1)
+            self.assertEqual(only_model[0]["model"], "mistral:7b")
+
+            by_query = store.list(query="riesgos", limit=10)
+            self.assertEqual(len(by_query), 1)
+            self.assertIn("riesgos", by_query[0]["question"])
+
+    def test_history_public_helpers(self):
+        with tempfile.TemporaryDirectory() as td:
+            custom = rag.QueryHistoryStore(Path(td) / "history.json")
+            with patch.object(rag, "HISTORY_STORE", custom), patch.object(rag, "HISTORY_FILE", Path(td) / "history.json"):
+                rag.HISTORY_STORE.add(
+                    question="q",
+                    model="llama3.1:8b",
+                    latency_ms=10,
+                    documents=[],
+                    answer="a",
+                )
+                status = rag.get_history(limit=5)
+                self.assertEqual(status["count"], 1)
+                cleared = rag.clear_history()
+                self.assertTrue(cleared["ok"])
+                self.assertEqual(cleared["removed"], 1)
+
+
 class MetadataTests(unittest.TestCase):
     def test_enrich_metadata_contains_required_fields(self):
         d = DummyDoc("contenido", {"page": 2})

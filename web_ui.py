@@ -9,6 +9,7 @@ import threading
 from pathlib import Path
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 HOST = "0.0.0.0"
 PORT = 7860
@@ -735,6 +736,7 @@ class Handler(BaseHTTPRequestHandler):
                 add_web_source,
                 get_data_inventory,
                 get_cache_status,
+                get_history,
                 apply_model_profile,
                 delete_model_profile,
                 export_configuration,
@@ -747,6 +749,7 @@ class Handler(BaseHTTPRequestHandler):
                 upsert_model_profile,
                 import_configuration,
                 clear_cache,
+                clear_history,
             )
         except Exception as exc:
             raise RuntimeError(f"No se pudo cargar backend RAG: {exc}") from exc
@@ -755,6 +758,7 @@ class Handler(BaseHTTPRequestHandler):
             "add_web_source": add_web_source,
             "get_data_inventory": get_data_inventory,
             "get_cache_status": get_cache_status,
+            "get_history": get_history,
             "get_runtime_config": get_runtime_config,
             "get_model_metrics": get_model_metrics,
             "list_model_profiles": list_model_profiles,
@@ -767,6 +771,7 @@ class Handler(BaseHTTPRequestHandler):
             "rag_chat": rag_chat,
             "set_active_models": set_active_models,
             "clear_cache": clear_cache,
+            "clear_history": clear_history,
         }
 
     def _parse_multipart_file(self):
@@ -866,6 +871,25 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
                 return
             self._send_json(status)
+            return
+
+        if self.path.startswith("/api/history"):
+            try:
+                backend = self._get_backend()
+                parsed = urlparse(self.path)
+                params = parse_qs(parsed.query)
+                query = params.get("q", [""])[0]
+                model = params.get("model", [""])[0]
+                limit_raw = params.get("limit", ["100"])[0]
+                limit = int(limit_raw)
+                payload = backend["get_history"](query=query, model=model, limit=limit)
+            except ValueError:
+                self._send_json({"error": "Parámetro limit inválido"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+            self._send_json(payload)
             return
 
         self._send_json({"error": "Ruta no encontrada"}, status=HTTPStatus.NOT_FOUND)
@@ -1058,6 +1082,16 @@ class Handler(BaseHTTPRequestHandler):
 
 
     def do_DELETE(self) -> None:  # noqa: N802
+        if self.path == "/api/history":
+            try:
+                backend = self._get_backend()
+                payload = backend["clear_history"]()
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+            self._send_json(payload)
+            return
+
         if self.path.startswith("/api/profiles/"):
             try:
                 backend = self._get_backend()

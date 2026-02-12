@@ -29,6 +29,7 @@ import subprocess
 import time
 import threading
 import platform
+import uuid
 import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -61,6 +62,7 @@ REGISTRY_FILE = CHROMA_DIR / "index_registry.json"
 SEMANTIC_CACHE_FILE = CHROMA_DIR / "semantic_cache.json"
 WEB_SOURCES_FILE = DATA_FOLDER / "web_sources.txt"
 MODEL_PROFILES_FILE = CHROMA_DIR / "model_profiles.json"
+HISTORY_FILE = CHROMA_DIR / "query_history.json"
 
 ACTIVE_EMBED_MODEL = EMBED_MODEL
 ACTIVE_CHAT_MODEL = CHAT_MODEL
@@ -732,6 +734,101 @@ def clear_cache() -> Dict[str, Any]:
     """Limpieza manual del cache inteligente."""
     result = SMART_CACHE.clear()
     return {"ok": True, **result, **SMART_CACHE.status()}
+
+
+class QueryHistoryStore:
+    """Historial persistente de consultas con filtros simples para análisis posterior."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self._items: List[Dict[str, Any]] = []
+        if self.path.exists():
+            try:
+                loaded = json.loads(self.path.read_text(encoding="utf-8"))
+                if isinstance(loaded, list):
+                    self._items = loaded
+            except Exception:
+                logger.warning("No fue posible leer historial existente, se reinicia")
+
+    def _persist(self) -> None:
+        self.path.write_text(json.dumps(self._items, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def add(
+        self,
+        *,
+        question: str,
+        model: str,
+        latency_ms: float,
+        documents: List[Dict[str, Any]],
+        answer: str,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            item = {
+                "id": str(uuid.uuid4()),
+                "timestamp": int(time.time()),
+                "question": question,
+                "model": model,
+                "latency_ms": round(float(latency_ms), 2),
+                "documents": documents,
+                "answer": answer,
+            }
+            self._items.append(item)
+            self._items = self._items[-2000:]
+            self._persist()
+            return item
+
+    def list(
+        self,
+        *,
+        query: Optional[str] = None,
+        model: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = list(reversed(self._items))
+        q = (query or "").strip().lower()
+        m = (model or "").strip().lower()
+        if q:
+            rows = [
+                r
+                for r in rows
+                if q in str(r.get("question", "")).lower() or q in str(r.get("answer", "")).lower()
+            ]
+        if m:
+            rows = [r for r in rows if str(r.get("model", "")).lower() == m]
+        safe_limit = max(1, min(int(limit or 100), 500))
+        return rows[:safe_limit]
+
+    def clear(self) -> Dict[str, Any]:
+        with self._lock:
+            removed = len(self._items)
+            self._items = []
+            self._persist()
+            return {"removed": removed}
+
+
+HISTORY_STORE = QueryHistoryStore(HISTORY_FILE)
+
+
+def get_history(
+    query: Optional[str] = None,
+    model: Optional[str] = None,
+    limit: int = 100,
+) -> Dict[str, Any]:
+    items = HISTORY_STORE.list(query=query, model=model, limit=limit)
+    return {
+        "items": items,
+        "count": len(items),
+        "filters": {"query": query or "", "model": model or "", "limit": max(1, min(int(limit or 100), 500))},
+        "history_file": str(HISTORY_FILE),
+    }
+
+
+def clear_history() -> Dict[str, Any]:
+    result = HISTORY_STORE.clear()
+    return {"ok": True, **result, "history_file": str(HISTORY_FILE)}
 
 
 def _lazy_import_langchain() -> Tuple[Any, Any, Any, Any, Any]:
@@ -1561,6 +1658,23 @@ def rag_chat(
         return f"No pude generar respuesta: {exc}"
 
     logger.info(f"Métricas consulta: {asdict(metrics)}")
+
+    history_docs = [
+        {
+            "source": d.metadata.get("source", ""),
+            "file_type": d.metadata.get("file_type", ""),
+            "page_number": d.metadata.get("page_number"),
+            "score": d.metadata.get("retrieval_score"),
+        }
+        for d in docs
+    ]
+    HISTORY_STORE.add(
+        question=question,
+        model=ACTIVE_CHAT_MODEL,
+        latency_ms=metrics.generation_latency_ms,
+        documents=history_docs,
+        answer=answer,
+    )
 
     if SEMANTIC_CACHE_ENABLED:
         SMART_CACHE.put(question=question, context=context, answer=answer, model=ACTIVE_CHAT_MODEL)
