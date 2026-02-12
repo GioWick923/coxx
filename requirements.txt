@@ -1,0 +1,14 @@
+# Core LangChain integrations
+langchain-community>=0.3.0
+langchain-text-splitters>=0.3.0
+langchain-ollama>=0.2.0
+
+# Vector store backend for Chroma
+chromadb>=0.5.0
+
+# Document loaders
+beautifulsoup4>=4.12.0
+pypdf>=5.0.0
+
+# Common runtime deps frequently used by web/document loaders
+requests>=2.31.0
