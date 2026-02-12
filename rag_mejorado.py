@@ -257,23 +257,141 @@ def list_ollama_models() -> List[str]:
     return models
 
 
+TASK_CHAT = "chat"
+TASK_EMBEDDING = "embedding"
+TASK_DEEP_ANALYSIS = "deep_analysis"
+
+
+# Heurísticas simples y explícitas por tipo de modelo/tarea.
+EMBED_KEYWORDS = ("embed", "nomic-embed", "bge", "e5", "mxbai")
+DEEP_ANALYSIS_KEYWORDS = ("70b", "34b", "32b", "27b", "qwen", "deepseek", "coder", "r1")
+CHAT_KEYWORDS = ("llama", "mistral", "gemma", "qwen", "phi")
+
+
+def classify_model_type(model_name: str) -> str:
+    """Clasifica un modelo Ollama en: embedding, deep_analysis o chat.
+
+    Reglas:
+    - Si contiene tokens de embeddings (embed, bge, e5, ...): embedding.
+    - Si no es embedding y parece modelo grande/analítico: deep_analysis.
+    - En otro caso: chat.
+    """
+    name = (model_name or "").lower()
+    if any(k in name for k in EMBED_KEYWORDS):
+        return TASK_EMBEDDING
+    if any(k in name for k in DEEP_ANALYSIS_KEYWORDS):
+        return TASK_DEEP_ANALYSIS
+    return TASK_CHAT
+
+
+def classify_models(installed_models: Optional[List[str]] = None) -> Dict[str, List[str]]:
+    """Agrupa modelos instalados por tipo de tarea.
+
+    Ejemplo:
+        input: ["nomic-embed-text", "llama3.1:8b", "deepseek-r1:32b"]
+        output: {
+            "embedding": ["nomic-embed-text"],
+            "chat": ["llama3.1:8b"],
+            "deep_analysis": ["deepseek-r1:32b"],
+        }
+    """
+    models = installed_models if installed_models is not None else list_ollama_models()
+    grouped: Dict[str, List[str]] = {
+        TASK_EMBEDDING: [],
+        TASK_CHAT: [],
+        TASK_DEEP_ANALYSIS: [],
+    }
+    for model in models:
+        grouped[classify_model_type(model)].append(model)
+    return grouped
+
+
+def select_best_model_for_task(
+    task: str,
+    installed_models: Optional[List[str]] = None,
+    fallback: Optional[str] = None,
+) -> str:
+    """Selecciona el mejor modelo según tipo de tarea solicitada.
+
+    Tareas soportadas: chat, embedding, deep_analysis.
+    """
+    grouped = classify_models(installed_models)
+    all_models = installed_models if installed_models is not None else list_ollama_models()
+
+    if task == TASK_EMBEDDING and grouped[TASK_EMBEDDING]:
+        return grouped[TASK_EMBEDDING][0]
+
+    if task == TASK_DEEP_ANALYSIS:
+        if grouped[TASK_DEEP_ANALYSIS]:
+            return grouped[TASK_DEEP_ANALYSIS][0]
+        # fallback fuerte: chat más "grande" encontrado.
+        if grouped[TASK_CHAT]:
+            return sorted(grouped[TASK_CHAT], key=lambda m: len(m), reverse=True)[0]
+
+    if task == TASK_CHAT and grouped[TASK_CHAT]:
+        return grouped[TASK_CHAT][0]
+
+    if all_models:
+        return all_models[0]
+
+    if fallback:
+        return fallback
+
+    raise RAGSetupError("No hay modelos disponibles para seleccionar")
+
+
 def suggest_models(installed_models: Optional[List[str]] = None) -> Dict[str, str]:
-    """Sugiere modelo de embeddings/chat en base a lo disponible localmente."""
+    """Sugiere modelos base (embeddings/chat/deep_analysis) en base a Ollama local."""
     models = installed_models if installed_models is not None else list_ollama_models()
     if not models:
-        return {"embed_model": EMBED_MODEL, "chat_model": CHAT_MODEL}
+        return {
+            "embed_model": EMBED_MODEL,
+            "chat_model": CHAT_MODEL,
+            "analysis_model": CHAT_MODEL,
+        }
 
-    embed_candidates = [
-        m
-        for m in models
-        if any(token in m.lower() for token in ("embed", "nomic-embed", "bge", "e5", "mxbai"))
-    ]
-    embed_model = embed_candidates[0] if embed_candidates else models[0]
+    return {
+        "embed_model": select_best_model_for_task(TASK_EMBEDDING, models, fallback=EMBED_MODEL),
+        "chat_model": select_best_model_for_task(TASK_CHAT, models, fallback=CHAT_MODEL),
+        "analysis_model": select_best_model_for_task(TASK_DEEP_ANALYSIS, models, fallback=CHAT_MODEL),
+    }
 
-    chat_candidates = [m for m in models if m != embed_model and "embed" not in m.lower()]
-    chat_model = chat_candidates[0] if chat_candidates else models[0]
 
-    return {"embed_model": embed_model, "chat_model": chat_model}
+def normalize_task(task: Optional[str]) -> str:
+    """Normaliza alias de tareas para selección de modelo."""
+    t = (task or "").strip().lower()
+    aliases = {
+        "chat": TASK_CHAT,
+        "conversation": TASK_CHAT,
+        "conversacional": TASK_CHAT,
+        "embedding": TASK_EMBEDDING,
+        "embeddings": TASK_EMBEDDING,
+        "vector": TASK_EMBEDDING,
+        "deep": TASK_DEEP_ANALYSIS,
+        "analysis": TASK_DEEP_ANALYSIS,
+        "analisis": TASK_DEEP_ANALYSIS,
+        "análisis": TASK_DEEP_ANALYSIS,
+        "deep_analysis": TASK_DEEP_ANALYSIS,
+    }
+    return aliases.get(t, TASK_CHAT)
+
+
+def select_models_for_tasks(
+    chat_task: str = TASK_CHAT,
+    embedding_task: str = TASK_EMBEDDING,
+    analysis_task: str = TASK_DEEP_ANALYSIS,
+    installed_models: Optional[List[str]] = None,
+) -> Dict[str, str]:
+    """Selecciona modelos para las tres tareas principales.
+
+    Esto sirve como API compacta para UI/backend.
+    """
+    models = installed_models if installed_models is not None else list_ollama_models()
+    return {
+        "chat_model": select_best_model_for_task(normalize_task(chat_task), models, fallback=CHAT_MODEL),
+        "embed_model": select_best_model_for_task(normalize_task(embedding_task), models, fallback=EMBED_MODEL),
+        "analysis_model": select_best_model_for_task(normalize_task(analysis_task), models, fallback=CHAT_MODEL),
+    }
 
 
 def set_active_models(
@@ -299,7 +417,9 @@ def set_active_models(
     return {
         "chat_model": ACTIVE_CHAT_MODEL,
         "embed_model": ACTIVE_EMBED_MODEL,
+        "analysis_model": suggest_models(installed)["analysis_model"] if installed else ACTIVE_CHAT_MODEL,
         "installed_models": installed,
+        "classified_models": classify_models(installed),
     }
 
 
@@ -369,6 +489,8 @@ def get_runtime_config() -> Dict[str, str | int | bool]:
         "embed_model": ACTIVE_EMBED_MODEL,
         "chat_model": ACTIVE_CHAT_MODEL,
         "installed_ollama_models": installed,
+        "classified_ollama_models": classify_models(installed),
+        "task_model_selection": select_models_for_tasks(installed_models=installed),
         "chroma_dir": str(CHROMA_DIR),
         "collection_name": COLLECTION_NAME,
         "chunk_size": CHUNK_SIZE,

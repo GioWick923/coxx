@@ -106,5 +106,36 @@ class ModelSelectionTests(unittest.TestCase):
             self.assertEqual(out["chat_model"], "mistral:7b")
 
 
+class ModelTaskRoutingTests(unittest.TestCase):
+    def test_classify_models_by_task_type(self):
+        models = ["nomic-embed-text", "llama3.1:8b", "deepseek-r1:32b"]
+        grouped = rag.classify_models(models)
+        self.assertIn("nomic-embed-text", grouped[rag.TASK_EMBEDDING])
+        self.assertIn("llama3.1:8b", grouped[rag.TASK_CHAT])
+        self.assertIn("deepseek-r1:32b", grouped[rag.TASK_DEEP_ANALYSIS])
+
+    def test_select_best_model_for_each_task(self):
+        models = ["nomic-embed-text", "llama3.1:8b", "deepseek-r1:32b"]
+        self.assertEqual(
+            rag.select_best_model_for_task(rag.TASK_EMBEDDING, models),
+            "nomic-embed-text",
+        )
+        self.assertEqual(
+            rag.select_best_model_for_task(rag.TASK_CHAT, models),
+            "llama3.1:8b",
+        )
+        self.assertEqual(
+            rag.select_best_model_for_task(rag.TASK_DEEP_ANALYSIS, models),
+            "deepseek-r1:32b",
+        )
+
+    def test_select_models_for_tasks_compact_api(self):
+        models = ["nomic-embed-text", "llama3.1:8b", "deepseek-r1:32b"]
+        selected = rag.select_models_for_tasks(installed_models=models)
+        self.assertEqual(selected["embed_model"], "nomic-embed-text")
+        self.assertEqual(selected["chat_model"], "llama3.1:8b")
+        self.assertEqual(selected["analysis_model"], "deepseek-r1:32b")
+
+
 if __name__ == "__main__":
     unittest.main()
