@@ -122,18 +122,53 @@ class EnvironmentValidator:
                     out.append(name)
         return out
 
+    def _list_ollama_models_from_fs(self) -> List[str]:
+        env_dir = os.getenv("OLLAMA_MODELS")
+        base = Path(env_dir) if env_dir else (Path.home() / ".ollama" / "models")
+        manifests = base / "manifests"
+        if not manifests.exists():
+            return []
+        out: List[str] = []
+        for file_path in manifests.rglob("*"):
+            if not file_path.is_file():
+                continue
+            parts = file_path.relative_to(manifests).parts
+            if len(parts) >= 4 and parts[-3] == "library":
+                name = f"{parts[-2]}:{parts[-1]}"
+                if name not in out:
+                    out.append(name)
+        return out
+
     def validate_ollama(self) -> CheckResult:
         """Valida comando `ollama`, conectividad y modelos disponibles."""
         cli_available = shutil.which("ollama") is not None
 
         if not cli_available:
+            models: List[str] = []
+            source = []
             try:
-                models = self._list_ollama_models_from_api()
+                for m in self._list_ollama_models_from_fs():
+                    if m not in models:
+                        models.append(m)
+                if models:
+                    source.append("filesystem")
+            except Exception:
+                pass
+
+            try:
+                for m in self._list_ollama_models_from_api():
+                    if m not in models:
+                        models.append(m)
+                if models and "api" not in source:
+                    source.append("api")
             except (URLError, TimeoutError, ValueError, OSError):
+                pass
+
+            if not models:
                 return CheckResult(
                     ok=False,
-                    errors=["No se encontró el comando `ollama` en PATH ni se logró consultar API local de Ollama."],
-                    suggestions=["Instala Ollama o agrega `ollama` al PATH. Si el servicio está activo, verifica `OLLAMA_HOST`."],
+                    errors=["No se encontró el comando `ollama` en PATH ni se lograron detectar modelos locales/API."],
+                    suggestions=["Instala Ollama o agrega `ollama` al PATH. Si el servicio está activo, verifica `OLLAMA_HOST` y/o `OLLAMA_MODELS`."],
                     details={"detected_models": []},
                 )
 
@@ -147,7 +182,7 @@ class EnvironmentValidator:
                 ok=len(models) > 0 and not missing_required,
                 warnings=warnings,
                 suggestions=suggestions,
-                details={"detected_models": models, "missing_required_models": missing_required, "source": "api"},
+                details={"detected_models": models, "missing_required_models": missing_required, "source": "+".join(source) or "fallback"},
             )
 
         try:

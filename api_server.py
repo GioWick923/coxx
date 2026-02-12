@@ -72,7 +72,25 @@ class AppState:
 STATE = AppState()
 
 INDEX_HTML_PATH = Path("ui_assets/index.html")
-INDEX_HTML = INDEX_HTML_PATH.read_text(encoding="utf-8") if INDEX_HTML_PATH.exists() else "<h1>UI no encontrada</h1>"
+DEFAULT_INDEX_HTML = """<!doctype html><html lang="es"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>RAG Studio</title></head><body style="background:#120a04;color:#ffd36b;font-family:Consolas,monospace;padding:16px"><h2>RAG Studio</h2><p>La plantilla principal no se pudo cargar; se muestra interfaz de respaldo.</p><div style="margin:8px 0"><input id="chatModelInput" placeholder="Modelo chat"/><input id="embedModelInput" placeholder="Modelo embeddings"/></div><textarea id="question" style="width:100%;height:120px" placeholder="Escribe tu pregunta..."></textarea><div id="answer" style="margin-top:8px;border:1px solid #7c4f18;padding:8px">Esperando consulta...</div><script>console.warn('UI fallback cargada');</script></body></html>"""
+
+
+def _load_index_html() -> str:
+    if not INDEX_HTML_PATH.exists():
+        return DEFAULT_INDEX_HTML
+    try:
+        html = INDEX_HTML_PATH.read_text(encoding="utf-8")
+    except Exception:
+        return DEFAULT_INDEX_HTML
+
+    required_tokens = ('id="question"', 'id="chatModelInput"', 'id="embedModelInput"', '/api/models/configure')
+    if not all(token in html for token in required_tokens):
+        logger.warning("Plantilla UI incompleta/corrupta; usando fallback")
+        return DEFAULT_INDEX_HTML
+    return html
+
+
+INDEX_HTML = _load_index_html()
 
 
 class Handler(BaseHTTPRequestHandler):

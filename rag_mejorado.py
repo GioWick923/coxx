@@ -1267,13 +1267,18 @@ def _list_ollama_models_from_fs() -> List[str]:
 
 
 def list_ollama_models() -> List[str]:
-    """Lista modelos Ollama local con estrategia robusta multi-fallback.
+    """Lista modelos Ollama con detección resiliente y preferencia local.
 
-    Orden de detección:
+    Fuentes consultadas:
     1) CLI `ollama list`
-    2) API local `/api/tags` (OLLAMA_HOST)
-    3) Escaneo de manifiestos en carpeta de modelos
+    2) filesystem de modelos locales (`OLLAMA_MODELS` o `~/.ollama/models`)
+    3) API local `/api/tags` (`OLLAMA_HOST`)
+
+    Se unifican resultados sin duplicados y se prioriza orden local (CLI/FS antes de API).
     """
+    discovered: List[str] = []
+
+    # 1) CLI
     try:
         proc = subprocess.run(
             ["ollama", "list"],
@@ -1286,23 +1291,29 @@ def list_ollama_models() -> List[str]:
         logger.warning(f"No fue posible consultar modelos Ollama por CLI: {exc}")
     else:
         if proc.returncode == 0:
-            cli_models = _parse_ollama_models_from_list_output(proc.stdout)
-            if cli_models:
-                return cli_models
+            for model in _parse_ollama_models_from_list_output(proc.stdout):
+                if model not in discovered:
+                    discovered.append(model)
         else:
             logger.warning(f"`ollama list` devolvió código {proc.returncode}: {proc.stderr.strip()}")
 
+    # 2) filesystem local
     try:
-        api_models = _list_ollama_models_from_api()
-        if api_models:
-            return api_models
+        for model in _list_ollama_models_from_fs():
+            if model not in discovered:
+                discovered.append(model)
+    except Exception as exc:
+        logger.warning(f"No fue posible consultar modelos Ollama por filesystem: {exc}")
+
+    # 3) API
+    try:
+        for model in _list_ollama_models_from_api():
+            if model not in discovered:
+                discovered.append(model)
     except (URLError, TimeoutError, ValueError, OSError) as exc:
         logger.warning(f"No fue posible consultar modelos Ollama por API: {exc}")
 
-    fs_models = _list_ollama_models_from_fs()
-    if fs_models:
-        return fs_models
-    return []
+    return discovered
 
 
 TASK_CHAT = "chat"
