@@ -1,0 +1,19 @@
+[project]
+name = "rag-studio-pro"
+version = "0.1.0"
+description = "RAG local con LangChain, Chroma y Ollama con UI web"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "langchain-community>=0.3.0",
+  "langchain-core>=0.3.0",
+  "langchain-text-splitters>=0.3.0",
+  "langchain-ollama>=0.2.0",
+  "chromadb>=0.5.0",
+  "beautifulsoup4>=4.12.0",
+  "pypdf>=5.0.0",
+  "requests>=2.31.0",
+]
+
+[tool.uv]
+package = false
