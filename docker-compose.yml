@@ -1,0 +1,43 @@
+version: "3.9"
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag_backend
+    environment:
+      RAG_DATA_DIR: /app/data
+      RAG_CHROMA_DIR: /app/chroma_db
+      OLLAMA_HOST: http://ollama:11434
+    volumes:
+      - rag_data:/app/data
+      - rag_chroma:/app/chroma_db
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+  ui:
+    image: nginx:1.27-alpine
+    container_name: rag_ui
+    depends_on:
+      - backend
+    ports:
+      - "7860:8080"
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: rag_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  rag_data:
+  rag_chroma:
+  ollama_data:

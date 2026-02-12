@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1200" viewBox="0 0 1600 1200">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#070509"/>
+      <stop offset="55%" stop-color="#140d08"/>
+      <stop offset="100%" stop-color="#1e1208"/>
+    </linearGradient>
+    <radialGradient id="glowY" cx="30%" cy="15%" r="45%">
+      <stop offset="0%" stop-color="#ffb347" stop-opacity="0.30"/>
+      <stop offset="100%" stop-color="#ffb347" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowC" cx="82%" cy="18%" r="35%">
+      <stop offset="0%" stop-color="#58efff" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#58efff" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M48 0H0V48" fill="none" stroke="#ffbf3b" stroke-opacity="0.08"/>
+    </pattern>
+  </defs>
+  <rect width="1600" height="1200" fill="url(#bg)"/>
+  <rect width="1600" height="1200" fill="url(#glowY)"/>
+  <rect width="1600" height="1200" fill="url(#glowC)"/>
+  <rect width="1600" height="1200" fill="url(#grid)"/>
+  <g stroke="#ffbf3b" stroke-opacity="0.15" fill="none">
+    <path d="M0 980H380L430 930H1100L1160 870H1600"/>
+    <path d="M0 220H280L340 270H990L1050 330H1600"/>
+    <path d="M180 0V270L240 320V1200"/>
+    <path d="M1360 0V420L1300 480V1200"/>
+  </g>
+</svg>
