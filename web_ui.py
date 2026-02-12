@@ -265,6 +265,20 @@ INDEX_HTML = """<!doctype html>
           <button id="askBtn" class="btn-primary" title="Envía la pregunta al backend RAG">🚀 Preguntar</button>
         </div>
 
+        <div class="panel" title="Selecciona modelos Ollama disponibles en tu PC">
+          <h3 class="panel-title" style="margin-bottom:6px"><img class="icon-anim" src="/assets/anim_loader.svg" alt="models"/>Modelos Ollama</h3>
+          <p class="hint">Puedes elegir manualmente o usar auto-detección inteligente de modelos instalados localmente.</p>
+          <div class="row">
+            <input id="chatModelInput" type="text" placeholder="Modelo chat (ej: llama3.1:8b)" title="Modelo LLM para generar respuestas" />
+            <input id="embedModelInput" type="text" placeholder="Modelo embeddings (ej: nomic-embed-text)" title="Modelo para vectorizar documentos" />
+          </div>
+          <div class="row">
+            <button id="refreshModelsBtn" title="Consultar modelos detectados por ollama list">🔄 Detectar modelos</button>
+            <button id="saveModelsBtn" title="Guardar modelos indicados y aplicarlos al backend">💾 Aplicar modelos</button>
+            <button id="autoModelsBtn" title="Elegir automáticamente modelos recomendados según los instalados">⚙️ Auto-configurar</button>
+          </div>
+        </div>
+
         <div class="panel" title="Anexa documentos o links sin salir de la interfaz">
           <h3 class="panel-title" style="margin-bottom:6px"><img class="icon-anim" src="/assets/anim_loader.svg" alt="load"/>Ingesta de fuentes</h3>
           <p class="hint">Sube archivos <b>.pdf/.txt</b> o agrega una URL para incorporar al corpus. Luego reindexa.</p>
@@ -319,6 +333,11 @@ INDEX_HTML = """<!doctype html>
     const historyEl = document.getElementById('history');
     const answerMetaEl = document.getElementById('answerMeta');
     const statusAnimEl = document.getElementById('statusAnim');
+    const chatModelInput = document.getElementById('chatModelInput');
+    const embedModelInput = document.getElementById('embedModelInput');
+    const refreshModelsBtn = document.getElementById('refreshModelsBtn');
+    const saveModelsBtn = document.getElementById('saveModelsBtn');
+    const autoModelsBtn = document.getElementById('autoModelsBtn');
 
     const history = [];
 
@@ -330,7 +349,7 @@ INDEX_HTML = """<!doctype html>
     }
 
     function toggleBusy(isBusy) {
-      for (const b of [buildBtn, loadBtn, askBtn, exampleBtn, uploadBtn, addUrlBtn, copyBtn, saveBtn]) {
+      for (const b of [buildBtn, loadBtn, askBtn, exampleBtn, uploadBtn, addUrlBtn, copyBtn, saveBtn, refreshModelsBtn, saveModelsBtn, autoModelsBtn]) {
         b.disabled = isBusy;
       }
     }
@@ -389,11 +408,46 @@ INDEX_HTML = """<!doctype html>
       setStatus('Respuesta guardada como archivo TXT.', 'ok');
     }
 
+
+    function fillModelInputs(config = {}) {
+      if (chatModelInput) chatModelInput.value = config.chat_model || chatModelInput.value || '';
+      if (embedModelInput) embedModelInput.value = config.embed_model || embedModelInput.value || '';
+    }
+
+    async function configureModels(auto_detect=false) {
+      toggleBusy(true);
+      setStatus(auto_detect ? 'Auto-configurando modelos...' : 'Aplicando modelos...', 'warn');
+      try {
+        const payload = {
+          auto_detect,
+          chat_model: (chatModelInput.value || '').trim(),
+          embed_model: (embedModelInput.value || '').trim(),
+        };
+        const resp = await fetch('/api/models/configure', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'No se pudo configurar modelos');
+        fillModelInputs(data);
+        setStatus(`Modelos activos: chat=${data.chat_model} | embed=${data.embed_model}`, 'ok');
+        await refreshStatus();
+      } catch (err) {
+        setStatus('Error configurando modelos.', 'error');
+        answerEl.textContent = String(err);
+        updateAnswerMeta(String(err));
+      } finally {
+        toggleBusy(false);
+      }
+    }
+
     async function refreshStatus() {
       try {
         const resp = await fetch('/api/status');
         const data = await resp.json();
         auditEl.textContent = JSON.stringify(data, null, 2);
+        fillModelInputs(data.config || {});
       } catch (err) {
         auditEl.textContent = 'No se pudo cargar estado: ' + String(err);
       }
@@ -493,6 +547,9 @@ INDEX_HTML = """<!doctype html>
     addUrlBtn.addEventListener('click', addUrl);
     copyBtn.addEventListener('click', copyAnswer);
     saveBtn.addEventListener('click', saveAnswerAsTxt);
+    refreshModelsBtn.addEventListener('click', refreshStatus);
+    saveModelsBtn.addEventListener('click', () => configureModels(false));
+    autoModelsBtn.addEventListener('click', () => configureModels(true));
 
     askBtn.addEventListener('click', async () => {
       const question = questionEl.value.trim();
@@ -578,6 +635,7 @@ class Handler(BaseHTTPRequestHandler):
                 get_runtime_config,
                 load_or_create_vectorstore,
                 rag_chat,
+                set_active_models,
             )
         except Exception as exc:
             raise RuntimeError(f"No se pudo cargar backend RAG: {exc}") from exc
@@ -588,6 +646,7 @@ class Handler(BaseHTTPRequestHandler):
             "get_runtime_config": get_runtime_config,
             "load_or_create_vectorstore": load_or_create_vectorstore,
             "rag_chat": rag_chat,
+            "set_active_models": set_active_models,
         }
 
     def _parse_multipart_file(self):
@@ -720,6 +779,28 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             self._send_json({"message": f"URL agregada: {added}. Reindexa para usarla."})
+            return
+
+        if self.path == "/api/models/configure":
+            try:
+                backend = self._get_backend()
+                data = self._parse_json_body()
+                auto_detect = bool(data.get("auto_detect", False))
+                chat_model = str(data.get("chat_model", "")).strip() or None
+                embed_model = str(data.get("embed_model", "")).strip() or None
+                result = backend["set_active_models"](
+                    chat_model=chat_model,
+                    embed_model=embed_model,
+                    auto_detect=auto_detect,
+                )
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+
+            self._send_json(result)
             return
 
         if self.path == "/api/ask":

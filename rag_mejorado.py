@@ -24,7 +24,9 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import time
+import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -53,6 +55,10 @@ SEMANTIC_CACHE_ENABLED = os.getenv("RAG_SEMANTIC_CACHE_ENABLED", "1") == "1"
 REGISTRY_FILE = CHROMA_DIR / "index_registry.json"
 SEMANTIC_CACHE_FILE = CHROMA_DIR / "semantic_cache.json"
 WEB_SOURCES_FILE = DATA_FOLDER / "web_sources.txt"
+
+ACTIVE_EMBED_MODEL = EMBED_MODEL
+ACTIVE_CHAT_MODEL = CHAT_MODEL
+_MODEL_LOCK = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +146,7 @@ class ModelRegistry:
     def embeddings(cls) -> Any:
         if cls._embeddings is None:
             _, _, _, OllamaEmbeddings, _ = _lazy_import_langchain()
-            cls._embeddings = OllamaEmbeddings(model=EMBED_MODEL)
+            cls._embeddings = OllamaEmbeddings(model=ACTIVE_EMBED_MODEL)
             logger.info("Embeddings inicializado")
         return cls._embeddings
 
@@ -148,9 +154,15 @@ class ModelRegistry:
     def llm(cls) -> Any:
         if cls._llm is None:
             _, _, _, _, OllamaLLM = _lazy_import_langchain()
-            cls._llm = OllamaLLM(model=CHAT_MODEL)
+            cls._llm = OllamaLLM(model=ACTIVE_CHAT_MODEL)
             logger.info("LLM inicializado")
         return cls._llm
+
+    @classmethod
+    def reset(cls) -> None:
+        """Reinicia instancias para aplicar cambio de modelo en caliente."""
+        cls._embeddings = None
+        cls._llm = None
 
 
 # ---------------------------------------------------------------------------
@@ -212,8 +224,83 @@ def _doc_hash(content: str, source: str, file_type: str) -> str:
 
 def _embedding_version() -> str:
     """Versionado de embeddings por modelo + chunking + colección."""
-    raw = f"{EMBED_MODEL}|{CHUNK_SIZE}|{CHUNK_OVERLAP}|{COLLECTION_NAME}".encode("utf-8")
+    raw = f"{ACTIVE_EMBED_MODEL}|{CHUNK_SIZE}|{CHUNK_OVERLAP}|{COLLECTION_NAME}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def list_ollama_models() -> List[str]:
+    """Lista modelos disponibles en Ollama local usando `ollama list`."""
+    try:
+        proc = subprocess.run(
+            ["ollama", "list"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=8,
+        )
+    except Exception as exc:
+        logger.warning(f"No fue posible consultar modelos Ollama: {exc}")
+        return []
+
+    if proc.returncode != 0:
+        logger.warning(f"`ollama list` devolvió código {proc.returncode}: {proc.stderr.strip()}")
+        return []
+
+    models: List[str] = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line or line.lower().startswith("name"):
+            continue
+        model = line.split()[0]
+        if model and model not in models:
+            models.append(model)
+    return models
+
+
+def suggest_models(installed_models: Optional[List[str]] = None) -> Dict[str, str]:
+    """Sugiere modelo de embeddings/chat en base a lo disponible localmente."""
+    models = installed_models if installed_models is not None else list_ollama_models()
+    if not models:
+        return {"embed_model": EMBED_MODEL, "chat_model": CHAT_MODEL}
+
+    embed_candidates = [
+        m
+        for m in models
+        if any(token in m.lower() for token in ("embed", "nomic-embed", "bge", "e5", "mxbai"))
+    ]
+    embed_model = embed_candidates[0] if embed_candidates else models[0]
+
+    chat_candidates = [m for m in models if m != embed_model and "embed" not in m.lower()]
+    chat_model = chat_candidates[0] if chat_candidates else models[0]
+
+    return {"embed_model": embed_model, "chat_model": chat_model}
+
+
+def set_active_models(
+    chat_model: Optional[str] = None,
+    embed_model: Optional[str] = None,
+    auto_detect: bool = False,
+) -> Dict[str, str | List[str]]:
+    """Configura modelos activos manual o automáticamente sin reiniciar la app."""
+    global ACTIVE_CHAT_MODEL, ACTIVE_EMBED_MODEL
+    installed = list_ollama_models()
+    if auto_detect:
+        suggested = suggest_models(installed)
+        chat_model = suggested["chat_model"]
+        embed_model = suggested["embed_model"]
+
+    with _MODEL_LOCK:
+        if chat_model:
+            ACTIVE_CHAT_MODEL = chat_model.strip()
+        if embed_model:
+            ACTIVE_EMBED_MODEL = embed_model.strip()
+        ModelRegistry.reset()
+
+    return {
+        "chat_model": ACTIVE_CHAT_MODEL,
+        "embed_model": ACTIVE_EMBED_MODEL,
+        "installed_models": installed,
+    }
 
 
 def _load_registry() -> Dict[str, Any]:
@@ -273,11 +360,15 @@ def add_web_source(url: str) -> str:
     return clean
 
 def get_runtime_config() -> Dict[str, str | int | bool]:
+    installed = list_ollama_models()
     return {
         "wiki_url": WIKI_URL,
         "data_folder": str(DATA_FOLDER),
-        "embed_model": EMBED_MODEL,
-        "chat_model": CHAT_MODEL,
+        "embed_model_default": EMBED_MODEL,
+        "chat_model_default": CHAT_MODEL,
+        "embed_model": ACTIVE_EMBED_MODEL,
+        "chat_model": ACTIVE_CHAT_MODEL,
+        "installed_ollama_models": installed,
         "chroma_dir": str(CHROMA_DIR),
         "collection_name": COLLECTION_NAME,
         "chunk_size": CHUNK_SIZE,

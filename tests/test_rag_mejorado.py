@@ -92,5 +92,19 @@ class IncrementalIndexTests(unittest.TestCase):
         self.assertEqual(len(touched), 1)
 
 
+class ModelSelectionTests(unittest.TestCase):
+    def test_suggest_models_prefers_embed_and_chat(self):
+        models = ["nomic-embed-text", "llama3.2:latest"]
+        suggested = rag.suggest_models(models)
+        self.assertEqual(suggested["embed_model"], "nomic-embed-text")
+        self.assertEqual(suggested["chat_model"], "llama3.2:latest")
+
+    def test_set_active_models_auto_detect(self):
+        with patch.object(rag, "list_ollama_models", return_value=["nomic-embed-text", "mistral:7b"]):
+            out = rag.set_active_models(auto_detect=True)
+            self.assertEqual(out["embed_model"], "nomic-embed-text")
+            self.assertEqual(out["chat_model"], "mistral:7b")
+
+
 if __name__ == "__main__":
     unittest.main()
