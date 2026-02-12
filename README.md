@@ -330,3 +330,21 @@ Importar con sobrescritura confirmada:
 ```bash
 curl -sS -X POST http://127.0.0.1:7860/api/config/import   -H 'Content-Type: application/json'   -d '{"overwrite_profiles": true, "configuration": { ... }}'
 ```
+
+## Migración parser multipart (sin `cgi`)
+
+Para compatibilidad con Python 3.13+ se eliminó el parser basado en `cgi.FieldStorage` y se reemplazó por un parser multipart moderno usando librería estándar `email`.
+
+### Cambio técnico
+- Antes: `cgi.parse_header` + `cgi.FieldStorage`.
+- Ahora: `email.parser.BytesParser` sobre un mensaje MIME sintético con el `Content-Type` original.
+
+### Ventajas
+- Evita `DeprecationWarning` y futura rotura por eliminación de `cgi`.
+- Mantiene contrato del endpoint `POST /api/upload-file` (campo `file`, mismo flujo).
+- Sin dependencias externas.
+
+### Compatibilidad
+No cambian rutas ni formato esperado desde frontend:
+- `Content-Type: multipart/form-data; boundary=...`
+- Campo de archivo: `file`

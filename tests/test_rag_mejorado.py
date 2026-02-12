@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import rag_mejorado as rag
+import web_ui
 
 
 class DummyDoc:
@@ -125,6 +126,40 @@ class QueryHistoryTests(unittest.TestCase):
                 cleared = rag.clear_history()
                 self.assertTrue(cleared["ok"])
                 self.assertEqual(cleared["removed"], 1)
+
+
+class MultipartUploadParserTests(unittest.TestCase):
+    def test_parse_multipart_file_ok(self):
+        boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
+        content_type = f"multipart/form-data; boundary={boundary}"
+        body = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="file"; filename="demo.txt"\r\n'
+            "Content-Type: text/plain\r\n\r\n"
+            "hola mundo\r\n"
+            f"--{boundary}--\r\n"
+        ).encode("utf-8")
+
+        filename, payload = web_ui.parse_multipart_file(content_type, body)
+        self.assertEqual(filename, "demo.txt")
+        self.assertEqual(payload, b"hola mundo")
+
+    def test_parse_multipart_file_missing_file_field(self):
+        boundary = "----X"
+        content_type = f"multipart/form-data; boundary={boundary}"
+        body = (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="other"\r\n\r\n'
+            "abc\r\n"
+            f"--{boundary}--\r\n"
+        ).encode("utf-8")
+
+        with self.assertRaises(ValueError):
+            web_ui.parse_multipart_file(content_type, body)
+
+    def test_parse_multipart_file_invalid_content_type(self):
+        with self.assertRaises(ValueError):
+            web_ui.parse_multipart_file("application/json", b"{}")
 
 
 class MetadataTests(unittest.TestCase):

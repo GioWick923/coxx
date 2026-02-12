@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import cgi
 import json
 import mimetypes
 import threading
+from email.parser import BytesParser
+from email.policy import default as email_default_policy
 from pathlib import Path
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,6 +15,38 @@ from urllib.parse import parse_qs, urlparse
 HOST = "0.0.0.0"
 PORT = 7860
 MAX_REQUEST_BYTES = 20_000
+
+
+def parse_multipart_file(content_type: str, body: bytes) -> tuple[str, bytes]:
+    """Parsea multipart/form-data sin usar `cgi` (compatible con Python 3.13+).
+
+    Se soporta un campo de archivo llamado `file` (contrato actual del endpoint).
+    """
+    if "multipart/form-data" not in (content_type or "").lower():
+        raise ValueError("Se esperaba multipart/form-data")
+
+    # Construimos un mensaje MIME sintético para reutilizar el parser estándar `email`.
+    synthetic = (
+        f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8") + body
+    )
+    msg = BytesParser(policy=email_default_policy).parsebytes(synthetic)
+
+    if not msg.is_multipart():
+        raise ValueError("Payload multipart inválido")
+
+    for part in msg.iter_parts():
+        if part.get_content_disposition() != "form-data":
+            continue
+        if part.get_param("name", header="content-disposition") != "file":
+            continue
+
+        filename = part.get_filename()
+        if not filename:
+            raise ValueError("Archivo vacío")
+        payload = part.get_payload(decode=True) or b""
+        return filename, payload
+
+    raise ValueError("No se encontró el campo file")
 
 
 class AppState:
@@ -775,21 +808,12 @@ class Handler(BaseHTTPRequestHandler):
         }
 
     def _parse_multipart_file(self):
-        ctype, _ = cgi.parse_header(self.headers.get("content-type", ""))
-        if ctype != "multipart/form-data":
-            raise ValueError("Se esperaba multipart/form-data")
-        form = cgi.FieldStorage(
-            fp=self.rfile,
-            headers=self.headers,
-            environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers.get("Content-Type", "")},
-        )
-        if "file" not in form:
-            raise ValueError("No se encontró el campo file")
-        fileitem = form["file"]
-        if not fileitem.filename:
-            raise ValueError("Archivo vacío")
-        data = fileitem.file.read()
-        return fileitem.filename, data
+        content_type = self.headers.get("Content-Type", "")
+        content_length = int(self.headers.get("Content-Length", "0"))
+        if content_length > MAX_REQUEST_BYTES:
+            raise ValueError("Payload demasiado grande")
+        body = self.rfile.read(content_length) if content_length else b""
+        return parse_multipart_file(content_type, body)
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path in {"/", "/index.html"}:
