@@ -734,6 +734,7 @@ class Handler(BaseHTTPRequestHandler):
             from rag_mejorado import (
                 add_web_source,
                 get_data_inventory,
+                get_cache_status,
                 apply_model_profile,
                 delete_model_profile,
                 export_configuration,
@@ -745,6 +746,7 @@ class Handler(BaseHTTPRequestHandler):
                 set_active_models,
                 upsert_model_profile,
                 import_configuration,
+                clear_cache,
             )
         except Exception as exc:
             raise RuntimeError(f"No se pudo cargar backend RAG: {exc}") from exc
@@ -752,6 +754,7 @@ class Handler(BaseHTTPRequestHandler):
         return {
             "add_web_source": add_web_source,
             "get_data_inventory": get_data_inventory,
+            "get_cache_status": get_cache_status,
             "get_runtime_config": get_runtime_config,
             "get_model_metrics": get_model_metrics,
             "list_model_profiles": list_model_profiles,
@@ -763,6 +766,7 @@ class Handler(BaseHTTPRequestHandler):
             "load_or_create_vectorstore": load_or_create_vectorstore,
             "rag_chat": rag_chat,
             "set_active_models": set_active_models,
+            "clear_cache": clear_cache,
         }
 
     def _parse_multipart_file(self):
@@ -822,12 +826,14 @@ class Handler(BaseHTTPRequestHandler):
             inventory = {"pdf_files": [], "txt_files": [], "pdf_count": 0, "txt_count": 0}
             config = {}
             model_metrics = {}
+            cache_status = {}
             profiles = {}
             try:
                 backend = self._get_backend()
                 inventory = backend["get_data_inventory"]()
                 config = backend["get_runtime_config"]()
                 model_metrics = backend["get_model_metrics"]()
+                cache_status = backend["get_cache_status"]()
                 profiles = backend["list_model_profiles"]()
             except Exception as exc:
                 backend_error = str(exc)
@@ -846,9 +852,20 @@ class Handler(BaseHTTPRequestHandler):
                     "inventory": inventory,
                     "config": config,
                     "model_metrics": model_metrics,
+                    "cache": cache_status,
                     "model_profiles": profiles,
                 }
             )
+            return
+
+        if self.path == "/api/cache/status":
+            try:
+                backend = self._get_backend()
+                status = backend["get_cache_status"]()
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+            self._send_json(status)
             return
 
         self._send_json({"error": "Ruta no encontrada"}, status=HTTPStatus.NOT_FOUND)
@@ -1024,6 +1041,16 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             self._send_json({"answer": answer})
+            return
+
+        if self.path == "/api/cache/clear":
+            try:
+                backend = self._get_backend()
+                payload = backend["clear_cache"]()
+            except Exception as exc:
+                self._send_json({"error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+            self._send_json(payload)
             return
 
         self._send_json({"error": "Ruta no encontrada"}, status=HTTPStatus.NOT_FOUND)

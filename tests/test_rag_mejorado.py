@@ -21,6 +21,64 @@ class SemanticCacheTests(unittest.TestCase):
             self.assertEqual(cache.get("hola   mundo"), "respuesta")
 
 
+class SmartResponseCacheTests(unittest.TestCase):
+    def test_smart_cache_stores_full_payload(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache = rag.SmartResponseCache(Path(td) / "smart_cache.json", ttl_seconds=3600)
+            cache.put(
+                question="¿Qué es IA?",
+                context="La IA estudia sistemas inteligentes.",
+                answer="La IA es un campo de la computación.",
+                model="llama3.1:8b",
+            )
+            hit = cache.get(
+                question="que es ia",
+                context="La IA estudia sistemas inteligentes.",
+                model="llama3.1:8b",
+            )
+            self.assertEqual(hit, "La IA es un campo de la computación.")
+
+    def test_smart_cache_similarity_and_expiration(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache = rag.SmartResponseCache(Path(td) / "smart_cache.json", ttl_seconds=1)
+            cache.put(
+                question="riesgos de ia en salud",
+                context="contexto común",
+                answer="respuesta",
+                model="llama3.1:8b",
+            )
+            similar = cache.get(
+                question="riesgos ia salud",
+                context="contexto común",
+                model="llama3.1:8b",
+            )
+            with patch.object(rag, "SMART_CACHE_SIMILARITY_THRESHOLD", 0.5):
+                similar = cache.get(
+                    question="riesgos ia salud",
+                    context="contexto común",
+                    model="llama3.1:8b",
+                )
+                self.assertEqual(similar, "respuesta")
+
+            with patch("rag_mejorado.time.time", return_value=9_999_999_999):
+                expired = cache.get(
+                    question="riesgos de ia en salud",
+                    context="contexto común",
+                    model="llama3.1:8b",
+                )
+            self.assertIsNone(expired)
+
+    def test_clear_cache(self):
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(rag, "SMART_CACHE", rag.SmartResponseCache(Path(td) / "cache.json", ttl_seconds=3600)):
+                rag.SMART_CACHE.put("q", "ctx", "a", "m")
+                status_before = rag.get_cache_status()
+                self.assertGreaterEqual(status_before["entries"], 1)
+                cleared = rag.clear_cache()
+                self.assertTrue(cleared["ok"])
+                self.assertEqual(cleared["entries"], 0)
+
+
 class MetadataTests(unittest.TestCase):
     def test_enrich_metadata_contains_required_fields(self):
         d = DummyDoc("contenido", {"page": 2})

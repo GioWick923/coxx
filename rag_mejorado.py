@@ -23,11 +23,13 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
 import threading
 import platform
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -52,6 +54,8 @@ MAX_CHARS_PER_CHUNK = int(os.getenv("RAG_MAX_CHARS_PER_CHUNK", "1200"))
 MAX_TOTAL_CONTEXT_CHARS = int(os.getenv("RAG_MAX_TOTAL_CONTEXT_CHARS", "4200"))
 ENABLE_CONTEXT_COMPRESSION = os.getenv("RAG_ENABLE_CONTEXT_COMPRESSION", "0") == "1"
 SEMANTIC_CACHE_ENABLED = os.getenv("RAG_SEMANTIC_CACHE_ENABLED", "1") == "1"
+SMART_CACHE_TTL_SECONDS = int(os.getenv("RAG_SMART_CACHE_TTL_SECONDS", "21600"))
+SMART_CACHE_SIMILARITY_THRESHOLD = float(os.getenv("RAG_SMART_CACHE_SIMILARITY_THRESHOLD", "0.82"))
 
 REGISTRY_FILE = CHROMA_DIR / "index_registry.json"
 SEMANTIC_CACHE_FILE = CHROMA_DIR / "semantic_cache.json"
@@ -576,6 +580,158 @@ class SemanticCache:
     def put(self, question: str, answer: str) -> None:
         self._data[self._key(question)] = answer
         self.path.write_text(json.dumps(self._data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+class SmartResponseCache:
+    """Cache inteligente con similitud de consultas, TTL y limpieza manual.
+
+    Cada entrada guarda:
+    - question
+    - context (texto usado en prompt)
+    - answer
+    - model
+    - created_at / expires_at
+    """
+
+    def __init__(self, path: Path, ttl_seconds: int = SMART_CACHE_TTL_SECONDS):
+        self.path = path
+        self.ttl_seconds = max(60, int(ttl_seconds))
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self._state: Dict[str, Any] = {
+            "hits": 0,
+            "misses": 0,
+            "entries": [],
+        }
+        if self.path.exists():
+            try:
+                loaded = json.loads(self.path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    self._state["hits"] = int(loaded.get("hits", 0))
+                    self._state["misses"] = int(loaded.get("misses", 0))
+                    self._state["entries"] = list(loaded.get("entries", []))
+            except Exception:
+                logger.warning("No fue posible leer smart cache existente, se reinicia")
+
+    @staticmethod
+    def _normalize(text: str) -> str:
+        base = (text or "").lower().strip()
+        base = "".join(
+            ch for ch in unicodedata.normalize("NFD", base) if unicodedata.category(ch) != "Mn"
+        )
+        return " ".join(base.split())
+
+    @staticmethod
+    def _tokenize(text: str) -> set[str]:
+        normalized = SmartResponseCache._normalize(text)
+        return {t for t in re.findall(r"[\wáéíóúñü]+", normalized, flags=re.IGNORECASE) if t}
+
+    @staticmethod
+    def _context_fingerprint(context: str) -> str:
+        return hashlib.sha256((context or "").encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+    @staticmethod
+    def _similarity(a: str, b: str) -> float:
+        a_tokens = SmartResponseCache._tokenize(a)
+        b_tokens = SmartResponseCache._tokenize(b)
+        if not a_tokens and not b_tokens:
+            return 1.0
+        if not a_tokens or not b_tokens:
+            return 0.0
+        inter = len(a_tokens & b_tokens)
+        union = len(a_tokens | b_tokens)
+        return inter / union if union else 0.0
+
+    def _persist(self) -> None:
+        self.path.write_text(json.dumps(self._state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _prune_expired(self) -> None:
+        now = time.time()
+        self._state["entries"] = [
+            e for e in self._state.get("entries", []) if float(e.get("expires_at", 0)) > now
+        ]
+
+    def get(self, question: str, context: str, model: str) -> Optional[str]:
+        """Busca match exacto/similar para la misma huella de contexto y modelo."""
+        with self._lock:
+            self._prune_expired()
+            normalized = self._normalize(question)
+            ctx_fp = self._context_fingerprint(context)
+
+            best_entry: Optional[Dict[str, Any]] = None
+            best_score = 0.0
+            for entry in self._state.get("entries", []):
+                if entry.get("model") != model:
+                    continue
+                if entry.get("context_fingerprint") != ctx_fp:
+                    continue
+                score = self._similarity(normalized, entry.get("normalized_question", ""))
+                if score > best_score:
+                    best_entry = entry
+                    best_score = score
+
+            if best_entry and best_score >= SMART_CACHE_SIMILARITY_THRESHOLD:
+                self._state["hits"] = int(self._state.get("hits", 0)) + 1
+                self._persist()
+                return str(best_entry.get("answer", ""))
+
+            self._state["misses"] = int(self._state.get("misses", 0)) + 1
+            self._persist()
+            return None
+
+    def put(self, question: str, context: str, answer: str, model: str) -> None:
+        with self._lock:
+            self._prune_expired()
+            created = time.time()
+            entry = {
+                "question": question,
+                "normalized_question": self._normalize(question),
+                "context": context,
+                "context_fingerprint": self._context_fingerprint(context),
+                "answer": answer,
+                "model": model,
+                "created_at": created,
+                "expires_at": created + self.ttl_seconds,
+            }
+            self._state["entries"].append(entry)
+            # Tope defensivo para no crecer indefinidamente.
+            self._state["entries"] = self._state["entries"][-500:]
+            self._persist()
+
+    def clear(self) -> Dict[str, Any]:
+        with self._lock:
+            removed = len(self._state.get("entries", []))
+            self._state["entries"] = []
+            self._persist()
+            return {"removed_entries": removed}
+
+    def status(self) -> Dict[str, Any]:
+        with self._lock:
+            self._prune_expired()
+            entries = self._state.get("entries", [])
+            return {
+                "enabled": SEMANTIC_CACHE_ENABLED,
+                "ttl_seconds": self.ttl_seconds,
+                "similarity_threshold": SMART_CACHE_SIMILARITY_THRESHOLD,
+                "entries": len(entries),
+                "hits": int(self._state.get("hits", 0)),
+                "misses": int(self._state.get("misses", 0)),
+                "cache_file": str(self.path),
+            }
+
+
+SMART_CACHE = SmartResponseCache(SEMANTIC_CACHE_FILE)
+
+
+def get_cache_status() -> Dict[str, Any]:
+    """Expone estado del cache inteligente para API/UI."""
+    return SMART_CACHE.status()
+
+
+def clear_cache() -> Dict[str, Any]:
+    """Limpieza manual del cache inteligente."""
+    result = SMART_CACHE.clear()
+    return {"ok": True, **result, **SMART_CACHE.status()}
 
 
 def _lazy_import_langchain() -> Tuple[Any, Any, Any, Any, Any]:
@@ -1363,13 +1519,6 @@ def rag_chat(
     if not question.strip():
         return "Por favor, envía una pregunta no vacía."
 
-    cache = SemanticCache(SEMANTIC_CACHE_FILE)
-    if SEMANTIC_CACHE_ENABLED:
-        cached = cache.get(question)
-        if cached:
-            logger.info("Semantic cache hit")
-            return cached
-
     metrics = Metrics()
 
     try:
@@ -1393,6 +1542,12 @@ def rag_chat(
         logger.warning("Sin contexto relevante")
         return "No encontré contexto relevante para responder con confianza."
 
+    if SEMANTIC_CACHE_ENABLED:
+        cached = SMART_CACHE.get(question=question, context=context, model=ACTIVE_CHAT_MODEL)
+        if cached:
+            logger.info("Smart cache hit")
+            return cached
+
     prompt = _build_prompt(question, context)
 
     gen_start = _now_ms()
@@ -1408,7 +1563,7 @@ def rag_chat(
     logger.info(f"Métricas consulta: {asdict(metrics)}")
 
     if SEMANTIC_CACHE_ENABLED:
-        cache.put(question, answer)
+        SMART_CACHE.put(question=question, context=context, answer=answer, model=ACTIVE_CHAT_MODEL)
     return answer
 
 
