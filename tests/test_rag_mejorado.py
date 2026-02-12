@@ -1,0 +1,141 @@
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import rag_mejorado as rag
+
+
+class DummyDoc:
+    def __init__(self, page_content, metadata=None):
+        self.page_content = page_content
+        self.metadata = metadata or {}
+
+
+class SemanticCacheTests(unittest.TestCase):
+    def test_cache_put_get(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache = rag.SemanticCache(Path(td) / "cache.json")
+            cache.put("Hola mundo", "respuesta")
+            self.assertEqual(cache.get("hola   mundo"), "respuesta")
+
+
+class MetadataTests(unittest.TestCase):
+    def test_enrich_metadata_contains_required_fields(self):
+        d = DummyDoc("contenido", {"page": 2})
+        m = rag._enrich_metadata(d, "a.txt", "txt")
+        self.assertIn("source", m)
+        self.assertIn("file_type", m)
+        self.assertIn("page_number", m)
+        self.assertIn("original_document_id", m)
+        self.assertIn("embedding_version", m)
+        self.assertEqual(m["file_type"], "txt")
+
+
+class ContextBuilderTests(unittest.TestCase):
+    def test_context_deduplicates(self):
+        docs = [
+            DummyDoc("mismo contenido", {"source": "s1", "file_type": "txt", "page_number": 1}),
+            DummyDoc("mismo contenido", {"source": "s2", "file_type": "txt", "page_number": 2}),
+        ]
+        context = rag._build_context(docs)
+        self.assertEqual(context.count("mismo contenido"), 1)
+
+
+class RagChatTests(unittest.TestCase):
+    def test_rag_chat_uses_cache(self):
+        vectorstore = MagicMock()
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(rag, "SEMANTIC_CACHE_ENABLED", True), patch.object(
+                rag, "SEMANTIC_CACHE_FILE", Path(td) / "semantic_cache.json"
+            ), patch.object(rag.ModelRegistry, "llm") as llm:
+                llm.return_value.invoke.return_value = "{\"answer\":\"ok\"}"
+                vectorstore.similarity_search_with_relevance_scores.return_value = [
+                    (DummyDoc("c1", {"source": "s", "file_type": "txt", "page_number": None}), 0.9)
+                ]
+                first = rag.rag_chat("q1", vectorstore)
+                second = rag.rag_chat("q1", vectorstore)
+                self.assertEqual(first, second)
+
+
+class RegistryTests(unittest.TestCase):
+    def test_embedding_version_stable(self):
+        v1 = rag._embedding_version()
+        v2 = rag._embedding_version()
+        self.assertEqual(v1, v2)
+        self.assertTrue(len(v1) > 5)
+
+
+class WebSourceTests(unittest.TestCase):
+    def test_add_and_list_web_source(self):
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(rag, "DATA_FOLDER", Path(td)), patch.object(
+                rag, "WEB_SOURCES_FILE", Path(td) / "web_sources.txt"
+            ), patch.object(rag, "WIKI_URL", "https://base.local"):
+                rag.add_web_source("https://example.com/doc")
+                urls = rag.list_web_sources()
+                self.assertIn("https://base.local", urls)
+                self.assertIn("https://example.com/doc", urls)
+
+
+class IncrementalIndexTests(unittest.TestCase):
+    def test_classify_changes_by_source_stable(self):
+        docs = [
+            DummyDoc("p1", {"source": "a.pdf", "file_type": "pdf", "source_id": "s1", "original_document_id": "h1"}),
+            DummyDoc("p2", {"source": "a.pdf", "file_type": "pdf", "source_id": "s1", "original_document_id": "h2"}),
+        ]
+        registry = {"sources": {}}
+        changed, touched, stats = rag._classify_changes(docs, registry)
+        self.assertEqual(len(changed), 2)
+        self.assertEqual(stats["new_docs"], 1)
+        self.assertEqual(len(touched), 1)
+
+
+class ModelSelectionTests(unittest.TestCase):
+    def test_suggest_models_prefers_embed_and_chat(self):
+        models = ["nomic-embed-text", "llama3.2:latest"]
+        suggested = rag.suggest_models(models)
+        self.assertEqual(suggested["embed_model"], "nomic-embed-text")
+        self.assertEqual(suggested["chat_model"], "llama3.2:latest")
+
+    def test_set_active_models_auto_detect(self):
+        with patch.object(rag, "list_ollama_models", return_value=["nomic-embed-text", "mistral:7b"]):
+            out = rag.set_active_models(auto_detect=True)
+            self.assertEqual(out["embed_model"], "nomic-embed-text")
+            self.assertEqual(out["chat_model"], "mistral:7b")
+
+
+class ModelTaskRoutingTests(unittest.TestCase):
+    def test_classify_models_by_task_type(self):
+        models = ["nomic-embed-text", "llama3.1:8b", "deepseek-r1:32b"]
+        grouped = rag.classify_models(models)
+        self.assertIn("nomic-embed-text", grouped[rag.TASK_EMBEDDING])
+        self.assertIn("llama3.1:8b", grouped[rag.TASK_CHAT])
+        self.assertIn("deepseek-r1:32b", grouped[rag.TASK_DEEP_ANALYSIS])
+
+    def test_select_best_model_for_each_task(self):
+        models = ["nomic-embed-text", "llama3.1:8b", "deepseek-r1:32b"]
+        self.assertEqual(
+            rag.select_best_model_for_task(rag.TASK_EMBEDDING, models),
+            "nomic-embed-text",
+        )
+        self.assertEqual(
+            rag.select_best_model_for_task(rag.TASK_CHAT, models),
+            "llama3.1:8b",
+        )
+        self.assertEqual(
+            rag.select_best_model_for_task(rag.TASK_DEEP_ANALYSIS, models),
+            "deepseek-r1:32b",
+        )
+
+    def test_select_models_for_tasks_compact_api(self):
+        models = ["nomic-embed-text", "llama3.1:8b", "deepseek-r1:32b"]
+        selected = rag.select_models_for_tasks(installed_models=models)
+        self.assertEqual(selected["embed_model"], "nomic-embed-text")
+        self.assertEqual(selected["chat_model"], "llama3.1:8b")
+        self.assertEqual(selected["analysis_model"], "deepseek-r1:32b")
+
+
+if __name__ == "__main__":
+    unittest.main()
